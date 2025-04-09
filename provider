@@ -1,0 +1,52 @@
+#!/bin/bash
+
+# Usage: ./profit-calculator.sh akash1yourprovideraddress
+
+# Check if provider address is given
+if [ -z "$1" ]; then
+  echo "Usage: $0 <provider-address>"
+  exit 1
+fi
+
+PROVIDER="$1"
+
+# Get current block height
+HEIGHT=$(provider-services query block | jq -r '.block.header.height')
+
+# Get live AKT price in USD from CoinGecko
+PRICE=$(curl -s "https://api.coingecko.com/api/v3/simple/price?ids=akash-network&vs_currencies=usd" | jq -r '.["akash-network"].usd')
+
+# Get and process lease data
+provider-services query market lease list --height "$HEIGHT" --provider "$PROVIDER" --gseq 0 --oseq 0 --page 1 --limit 10000 --state active -o json | jq --argjson h "$HEIGHT" -r '
+  ["owner","dseq/gseq/oseq","rate","monthly","withdrawn","consumed","days"],
+  (.leases[] | [
+    .lease.lease_id.owner,
+    "\(.lease.lease_id.dseq)/\(.lease.lease_id.gseq)/\(.lease.lease_id.oseq)",
+    (.escrow_payment.rate.amount|tonumber),
+    (.escrow_payment.rate.amount|tonumber),
+    (.escrow_payment.withdrawn.amount|tonumber),
+    (((($h - (.lease.created_at|tonumber)) * (.escrow_payment.rate.amount|tonumber)) / 1e6)),
+    (((($h - (.lease.created_at|tonumber)) / ((60 / 6) * 60 * 24))))
+  ]) | @csv' | awk -F ',' -v price="$PRICE" '
+  BEGIN {
+    OFS=",";
+    block_time=6;
+    blocks_per_day=(60/block_time)*60*24;
+    total=0;
+    header_color="\033[1;36m";
+    reset="\033[0m";
+    value_color="\033[1;32m";
+  }
+  NR==1 {
+    print header_color $0 ",daily_profit_usd" reset;
+    next;
+  }
+  {
+    rate=$3+0;
+    daily_profit_usd=((rate * blocks_per_day) / 1e6) * price;
+    total+=daily_profit_usd;
+    printf value_color $0 ",%.2f\n" reset, daily_profit_usd;
+  }
+  END {
+    printf "\n\033[1;33mTotal Daily Profit: $%.2f USD\033[0m\n", total;
+  }' | column -t -s,
